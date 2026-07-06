@@ -104,7 +104,94 @@ def save_video(frames, fps, save_path):
     for frame in tqdm.tqdm(frames, desc="saving video"):
         writer.write(frame)
     writer.release()
-    
+
+def save_frames(frames, save_folder, image_ext="png"):
+    os.makedirs(save_folder, exist_ok=True)
+
+    for file_name in os.listdir(save_folder):
+        if file_name.lower().endswith(f".{image_ext.lower()}"):
+            os.remove(osp.join(save_folder, file_name))
+
+    if frames.shape[-1] == 4:
+        frames = frames[..., :3]  # remove alpha channel
+
+    if frames.max() <= 1:
+        frames = (frames * 255).astype(np.uint8)
+
+    for frame_idx, frame in enumerate(tqdm.tqdm(frames, desc="saving frames")):
+        cv2.imwrite(
+            osp.join(save_folder, f"{frame_idx:04d}.{image_ext}"),
+            frame,
+        )
+
+
+// Add plot angle comparison function
+def save_angle_plot(gen_angles_list, save_path, gt_angles_list=None, norm_points=101):
+    """Save a per-frame articulation angle comparison plot as a PNG.
+
+    All sequences are resampled to a common normalised time axis [0, 100 %]
+    so traces with different frame counts are directly comparable.
+
+    Parameters
+    ----------
+    gen_angles_list : list of array-like
+        Generated angle sequences (degrees). One entry per sample.
+    save_path : str
+        Destination .png file path.
+    gt_angles_list : list of array-like, optional
+        Ground-truth angle sequences (degrees).
+    norm_points : int
+        Points on the normalised time axis (default 101 → 0-100 %).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    os.makedirs(osp.dirname(save_path), exist_ok=True)
+
+    norm_x = np.linspace(0, 100, norm_points)
+
+    def _resample(seq):
+        seq = np.asarray(seq, dtype=float)
+        src_x = np.linspace(0, 100, len(seq))
+        return np.interp(norm_x, src_x, seq)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    # ---- GT ----
+    if gt_angles_list is not None and len(gt_angles_list) > 0:
+        gt_resampled = np.stack([_resample(g) for g in gt_angles_list])
+        for row in gt_resampled:
+            ax.plot(norm_x, row, color="lightcoral", linewidth=0.8, alpha=0.3)
+        gt_mean = gt_resampled.mean(0)
+        gt_std  = gt_resampled.std(0)
+        ax.fill_between(norm_x, gt_mean - gt_std, gt_mean + gt_std,
+                        alpha=0.25, color="tomato")
+        ax.plot(norm_x, gt_mean, color="tomato", linewidth=2.0,
+                label=f"GT mean ± std  (n={len(gt_angles_list)})")
+
+    # ---- Generated ----
+    if gen_angles_list is not None and len(gen_angles_list) > 0:
+        gen_resampled = np.stack([_resample(g) for g in gen_angles_list])
+        for row in gen_resampled:
+            ax.plot(norm_x, row, color="lightskyblue", linewidth=0.8, alpha=0.5)
+        gen_mean = gen_resampled.mean(0)
+        gen_std  = gen_resampled.std(0)
+        ax.fill_between(norm_x, gen_mean - gen_std, gen_mean + gen_std,
+                        alpha=0.25, color="steelblue")
+        ax.plot(norm_x, gen_mean, color="steelblue", linewidth=2.0,
+                label=f"Generated mean ± std  (n={len(gen_angles_list)})")
+
+    ax.set_xlabel("Normalised time (%)")
+    ax.set_ylabel("Articulation angle (deg)")
+    ax.set_title("Object articulation angle  (normalised time)")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+
+
 def save_mesh_obj(
     vertices, faces, save_folder,
 ):

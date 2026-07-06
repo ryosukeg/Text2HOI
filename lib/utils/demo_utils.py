@@ -75,8 +75,7 @@ def get_object_hand_info_shap_e(
         object_name = search_object_shape_e(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp, obj_names)
         is_lhand, is_rhand = search_hand(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp)
         obj_file = get_shap_e_obj_file(obj_root, object_name)
-        obj_mesh = trimesh.load(obj_file, maintain_order=True)
-        # obj_mesh = trimesh.exchange.load.load_mesh(obj_file, process=False)
+        obj_mesh = trimesh.load(obj_file, maintain_order=True, process=False)
         obj_verts_org = proc_torch_cuda(obj_mesh.vertices.copy())
         obj_normal = obj_mesh.vertex_normals
         obj_normal = obj_normal / np.linalg.norm(obj_normal, axis=1, keepdims=True)
@@ -150,8 +149,7 @@ def get_object_hand_info(
         object_name = search_object(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp, data_config)
         is_lhand, is_rhand = search_hand(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp)
         obj_file = get_obj_file(obj_root, object_name, data_config)
-        obj_mesh = trimesh.load(obj_file, maintain_order=True)
-        # obj_mesh = trimesh.exchange.load.load_mesh(obj_file, process=False)
+        obj_mesh = trimesh.load(obj_file, maintain_order=True, process=False)
         obj_verts_org = proc_torch_cuda(obj_mesh.vertices.copy())
         if data_config.name == "arctic":
             obj_verts_org = obj_verts_org/1000

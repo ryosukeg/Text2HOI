@@ -30,12 +30,16 @@ from lib.networks.clip import load_and_freeze_clip, encoded_text
 from lib.utils.file import (
     make_save_folder, 
     save_video, 
+    save_frames,
+    save_angle_plot,
     save_mesh_obj, 
 )
 from lib.utils.proc import (
     proc_obj_feat_final, 
     proc_cond_contact_estimator, 
     proc_refiner_input, 
+    proc_numpy, 
+    proc_torch_cuda, 
 )
 from lib.utils.visualize import render_videos
 
@@ -97,6 +101,21 @@ def main(config):
     obj_feat = pointnet(normalized_obj_pc)
     
     batch_num = len(text)//64 + 1
+
+    # Pre-load GT data for ARCTIC angle comparison and GT rendering
+    gt_data = None
+    if dataset_name == "arctic":
+        _raw = np.load(data_config.data_path, allow_pickle=True)
+        gt_data = {k: _raw[k] for k in (
+            "x_lhand", "x_rhand", "x_obj", "x_obj_angle",
+            "object_name", "action_name", "nframes",
+            "is_lhand", "is_rhand",
+        )}
+
+    # Accumulate generated angles across samples for multi-sample comparison plot
+    gen_angles_all = {}   # key: (batch_idx, text_idx) → list of angle arrays
+    gt_angles_cache = {}  # key: (batch_idx, text_idx) → (gt_angles_list, gt_idxs)
+
     for sample_idx in range(nsamples):
         for batch_idx in range(batch_num):
             ecn_text_batch = enc_text[batch_idx*64:(batch_idx+1)*64]
@@ -219,10 +238,132 @@ def main(config):
                     save_path=osp.join(
                         result_folder, 
                         "motion", 
-                        f"batch{batch_idx}_{text_idx}_sample{sample_idx}_refined.mp4"
+                        f"generated_b{batch_idx}_t{text_idx}_s{sample_idx}.mp4"
                     )
                 )
-                
+
+                save_frames(
+                    motion_video,
+                    save_folder=osp.join(
+                        result_folder,
+                        "motion_frames",
+                        f"generated_b{batch_idx}_t{text_idx}_s{sample_idx}",
+                    ),
+                )
+
+                if dataset_name == "arctic" and obj_nfeats == 10:
+                    angles_rad = proc_numpy(refined_x_obj_sampled[:, 9])
+                    angles_deg = np.degrees(angles_rad)
+
+                    key = (batch_idx, text_idx)
+                    gen_angles_all.setdefault(key, []).append(angles_deg)
+
+                    # --- Collect matching GT sequences (only once per key) ---
+                    if key not in gt_angles_cache:
+                        gt_angles_list = None
+                        gt_idxs = np.array([], dtype=int)
+                        if gt_data is not None:
+                            from constants.arctic_constants import arctic_obj_name
+                            text_str = text[batch_idx * 64 + text_idx].lower()
+                            action_str = text_str.split()[0]
+                            obj_name_gt = None
+                            for _n in arctic_obj_name:
+                                if _n in text_str:
+                                    obj_name_gt = _n
+                                    break
+                            il_gt = int(is_lhand_text)
+                            ir_gt = int(is_rhand_text)
+                            if obj_name_gt is not None:
+                                gt_mask = (
+                                    (gt_data["object_name"] == obj_name_gt)
+                                    & (gt_data["action_name"] == action_str)
+                                    & (gt_data["is_lhand"] == il_gt)
+                                    & (gt_data["is_rhand"] == ir_gt)
+                                )
+                                gt_idxs = np.where(gt_mask)[0]
+                                if len(gt_idxs) > 0:
+                                    gt_angles_list = [
+                                        np.degrees(gt_data["x_obj_angle"][i, :gt_data["nframes"][i], 0])
+                                        for i in gt_idxs
+                                    ]
+                        gt_angles_cache[key] = (gt_angles_list, gt_idxs)
+                    else:
+                        gt_angles_list, gt_idxs = gt_angles_cache[key]
+
+                    # --- Angle comparison plot (updated with all samples so far) ---
+                    save_angle_plot(
+                        gen_angles_all[key],
+                        save_path=osp.join(
+                            result_folder,
+                            "angle_plots",
+                            f"angle_comparison_b{batch_idx}_t{text_idx}.png",
+                        ),
+                        gt_angles_list=gt_angles_list,
+                    )
+
+                    # --- Render representative GT sequence (only once per key) ---
+                    if sample_idx == 0 and len(gt_idxs) > 0:
+                        gt_nframes_list = [gt_data["nframes"][i] for i in gt_idxs]
+                        med_i = gt_idxs[
+                            np.argsort(gt_nframes_list)[len(gt_nframes_list) // 2]
+                        ]
+                        gt_nf = min(int(gt_data["nframes"][med_i]), max_nframes)
+
+                        x_lhand_gt = proc_torch_cuda(
+                            gt_data["x_lhand"][med_i, :gt_nf]
+                        )
+                        x_rhand_gt = proc_torch_cuda(
+                            gt_data["x_rhand"][med_i, :gt_nf]
+                        )
+                        x_obj_gt = proc_torch_cuda(
+                            np.concatenate([
+                                gt_data["x_obj"][med_i, :gt_nf],
+                                gt_data["x_obj_angle"][med_i, :gt_nf],
+                            ], axis=-1)
+                        )
+
+                        gt_obj_verts_tf, gt_lhand_verts, gt_lhand_faces_r, \
+                        gt_rhand_verts, gt_rhand_faces_r = \
+                            proc_results(
+                                x_lhand_gt, x_rhand_gt, x_obj_gt,
+                                obj_verts_text, lhand_layer, rhand_layer,
+                                is_lhand_text, is_rhand_text,
+                                dataset_name, obj_top_idx_text,
+                            )
+
+                        if is_lhand_text and gt_lhand_verts is not None:
+                            gt_lhand_verts[:, :, :2] -= \
+                                gt_obj_verts_tf[0, :, :2].mean(0)[None, None]
+                        if is_rhand_text and gt_rhand_verts is not None:
+                            gt_rhand_verts[:, :, :2] -= \
+                                gt_obj_verts_tf[0, :, :2].mean(0)[None, None]
+                        gt_obj_verts_tf[:, :, :2] -= \
+                            gt_obj_verts_tf[0, :, :2].mean(0)[None, None]
+
+                        gt_video = render_videos(
+                            renderer,
+                            gt_lhand_verts, gt_lhand_faces_r,
+                            gt_rhand_verts, gt_rhand_faces_r,
+                            gt_obj_verts_tf, obj_faces_text,
+                            is_lhand_text, is_rhand_text,
+                        )
+                        save_video(
+                            gt_video, fps=fps,
+                            save_path=osp.join(
+                                result_folder,
+                                "motion",
+                                f"gt_b{batch_idx}_t{text_idx}.mp4",
+                            ),
+                        )
+                        save_frames(
+                            gt_video,
+                            save_folder=osp.join(
+                                result_folder,
+                                "gt_frames",
+                                f"gt_b{batch_idx}_t{text_idx}",
+                            ),
+                        )
+
                 if save_obj:
                     save_mesh_obj(
                         refined_obj_verts_tf,
