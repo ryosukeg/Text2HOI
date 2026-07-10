@@ -125,7 +125,7 @@ def save_frames(frames, save_folder, image_ext="png"):
         )
 
 
-// Add plot angle comparison function
+# Add plot angle comparison function
 def save_angle_plot(gen_angles_list, save_path, gt_angles_list=None, norm_points=101):
     """Save a per-frame articulation angle comparison plot as a PNG.
 

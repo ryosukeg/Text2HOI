@@ -73,7 +73,18 @@ def get_object_hand_info_shap_e(
         obj_names = glob.glob(osp.join(obj_root, "*"))
         obj_names = [osp.basename(obj_name) for obj_name in obj_names]
         object_name = search_object_shape_e(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp, obj_names)
-        is_lhand, is_rhand = search_hand(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp)
+        text_lower = text[text_idx].lower()
+        if "both hands" in text_lower:
+            is_lhand, is_rhand = 1, 1
+            print("hand type: both hands (from text)")
+        elif "right hand" in text_lower:
+            is_lhand, is_rhand = 0, 1
+            print("hand type: right hand (from text)")
+        elif "left hand" in text_lower:
+            is_lhand, is_rhand = 1, 0
+            print("hand type: left hand (from text)")
+        else:
+            is_lhand, is_rhand = search_hand(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp)
         obj_file = get_shap_e_obj_file(obj_root, object_name)
         obj_mesh = trimesh.load(obj_file, maintain_order=True, process=False)
         obj_verts_org = proc_torch_cuda(obj_mesh.vertices.copy())
@@ -147,7 +158,18 @@ def get_object_hand_info(
         else:
             text_feat_mpnet_sp = None
         object_name = search_object(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp, data_config)
-        is_lhand, is_rhand = search_hand(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp)
+        text_lower = text[text_idx].lower()
+        if "both hands" in text_lower:
+            is_lhand, is_rhand = 1, 1
+            print("hand type: both hands (from text)")
+        elif "right hand" in text_lower:
+            is_lhand, is_rhand = 0, 1
+            print("hand type: right hand (from text)")
+        elif "left hand" in text_lower:
+            is_lhand, is_rhand = 1, 0
+            print("hand type: left hand (from text)")
+        else:
+            is_lhand, is_rhand = search_hand(clip_model, mpnet, text_feat_clip_sp, text_feat_mpnet_sp)
         obj_file = get_obj_file(obj_root, object_name, data_config)
         obj_mesh = trimesh.load(obj_file, maintain_order=True, process=False)
         obj_verts_org = proc_torch_cuda(obj_mesh.vertices.copy())
