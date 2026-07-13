@@ -32,6 +32,7 @@ from lib.utils.file import (
     save_video, 
     save_frames,
     save_angle_plot,
+    save_angle_plot_realtime,
     save_mesh_obj, 
 )
 from lib.utils.proc import (
@@ -63,6 +64,39 @@ def main(config):
     text = config.test_text
     hand_nfeats = config.texthom.hand_nfeats
     obj_nfeats = config.texthom.obj_nfeats
+
+    # ---- Method 2: angle-conditioned inference ----
+    use_angle_cond = bool(getattr(config.texthom, "use_angle_cond", False))
+    target_angle_deg_cli = None
+    if "target_angle_deg" in config:
+        target_angle_deg_cli = float(config.target_angle_deg)
+
+    # ---- Post-hoc angle truncation (old model, no retraining needed) ----
+    # +truncate_at_angle_deg=60  -> cut the sequence at the first frame that
+    # reaches the target angle, leaving the rest of the model unchanged.
+    truncate_at_angle_deg = None
+    if "truncate_at_angle_deg" in config:
+        truncate_at_angle_deg = float(config.truncate_at_angle_deg)
+        print(f"[PostHoc] truncate_at_angle_deg={truncate_at_angle_deg:.1f}°")
+
+    # ---- Post-hoc temporal resampling ----
+    # +retime_nframes=45 -> resample the full generated sequence to N frames
+    # while preserving the final pose/angle (uniform temporal compression).
+    retime_nframes = None
+    if "retime_nframes" in config:
+        retime_nframes = max(2, int(config.retime_nframes))
+        print(f"[Retime] retime_nframes={retime_nframes}")
+    if use_angle_cond:
+        angle_min_deg = float(config.texthom.angle_min_deg)
+        angle_max_deg = float(config.texthom.angle_max_deg)
+        if target_angle_deg_cli is None:
+            target_angle_deg_cli = 0.5 * (angle_min_deg + angle_max_deg)
+        _denom = max(angle_max_deg - angle_min_deg, 1e-6)
+        angle_cond_scalar = (target_angle_deg_cli - angle_min_deg) / _denom
+        print(f"[Method2] angle-cond inference: target_angle_deg={target_angle_deg_cli}, "
+              f"normalized={angle_cond_scalar:.4f}")
+    else:
+        angle_cond_scalar = None
 
     lhand_layer = build_mano_aa(is_rhand=False, flat_hand=data_config.flat_hand).cuda()
     rhand_layer = build_mano_aa(is_rhand=True, flat_hand=data_config.flat_hand).cuda()
@@ -142,6 +176,15 @@ def main(config):
             duration = seq_cvae.decode(ecn_text_batch)
             duration *= 150
             duration = duration.long()
+            # ---- angle-cond model was trained with retime to max_nframes ----
+            # Force duration = max_nframes so the full angle trajectory is rendered.
+            if use_angle_cond:
+                duration = torch.full_like(duration, max_nframes)
+            # ---- manual duration override (+override_duration=N) ----
+            if "override_duration" in config:
+                override_nf = max(1, min(int(config.override_duration), max_nframes))
+                duration = torch.full_like(duration, override_nf)
+                print(f"[override_duration] {override_nf} frames")
             valid_mask_lhand, valid_mask_rhand, valid_mask_obj \
                 = get_valid_mask_bunch(
                     is_lhand_batch, is_rhand_batch, 
@@ -163,7 +206,16 @@ def main(config):
                     valid_mask_lhand, 
                     valid_mask_rhand, 
                     valid_mask_obj, 
-                    device=torch.device("cuda")
+                    device=torch.device("cuda"),
+                    angle_cond=(
+                        torch.full(
+                            (enc_text_batch.shape[0], 1),
+                            float(angle_cond_scalar),
+                            device=enc_text_batch.device,
+                            dtype=torch.float32,
+                        )
+                        if use_angle_cond else None
+                    ),
                 )
             
             if est_contact_map is None:
@@ -208,6 +260,63 @@ def main(config):
                 refined_x_lhand_sampled = refined_x_lhand[text_idx][:text_duration]
                 refined_x_rhand_sampled = refined_x_rhand[text_idx][:text_duration]
                 refined_x_obj_sampled = refined_x_obj[text_idx][:text_duration]
+
+                # ---- post-hoc truncation at target angle ----
+                if truncate_at_angle_deg is not None and dataset_name == "arctic" and obj_nfeats == 10:
+                    import numpy as _np
+                    angles_rad = refined_x_obj_sampled[:, 9].cpu().numpy()
+                    target_rad = float(_np.deg2rad(truncate_at_angle_deg))
+                    tol_rad = float(_np.deg2rad(5.0))
+                    reach = _np.where(_np.abs(angles_rad - target_rad) <= tol_rad)[0]
+                    if len(reach) > 0:
+                        cut = int(reach[0]) + 1
+                    else:
+                        cut = int(_np.argmin(_np.abs(angles_rad - target_rad))) + 1
+                    cut = max(1, min(cut, text_duration))
+                    print(f"  [PostHoc] cut at frame {cut}/{text_duration} "
+                          f"(angle={float(_np.degrees(angles_rad[cut-1])):.1f}° "
+                          f"target={truncate_at_angle_deg:.1f}°)")
+                    # ---- stretch (retime) to original duration via linear interp ----
+                    if cut < text_duration:
+                        t_src = _np.linspace(0, cut - 1, cut)
+                        t_dst = _np.linspace(0, cut - 1, text_duration)
+                        def _stretch(tensor):
+                            arr = tensor.cpu().numpy()          # (cut, D)
+                            out = _np.stack(
+                                [_np.interp(t_dst, t_src, arr[:, d]) for d in range(arr.shape[1])],
+                                axis=1,
+                            ).astype(_np.float32)
+                            return torch.from_numpy(out).to(tensor.device)
+                        refined_x_lhand_sampled = _stretch(refined_x_lhand_sampled[:cut])
+                        refined_x_rhand_sampled = _stretch(refined_x_rhand_sampled[:cut])
+                        refined_x_obj_sampled   = _stretch(refined_x_obj_sampled[:cut])
+                        print(f"  [PostHoc] retimed to {text_duration} frames "
+                              f"(final angle={float(_np.degrees(refined_x_obj_sampled[-1, 9].item())):.1f}°)")
+                    else:
+                        refined_x_lhand_sampled = refined_x_lhand_sampled[:cut]
+                        refined_x_rhand_sampled = refined_x_rhand_sampled[:cut]
+                        refined_x_obj_sampled   = refined_x_obj_sampled[:cut]
+
+                # ---- post-hoc temporal resampling to retime_nframes ----
+                if retime_nframes is not None:
+                    import numpy as _np2
+                    cur_len = refined_x_obj_sampled.shape[0]
+                    if retime_nframes != cur_len:
+                        t_src = _np2.linspace(0, cur_len - 1, cur_len)
+                        t_dst = _np2.linspace(0, cur_len - 1, retime_nframes)
+                        def _retime(tensor):
+                            arr = tensor.cpu().numpy()
+                            out = _np2.stack(
+                                [_np2.interp(t_dst, t_src, arr[:, d]) for d in range(arr.shape[1])],
+                                axis=1,
+                            ).astype(_np2.float32)
+                            return torch.from_numpy(out).to(tensor.device)
+                        refined_x_lhand_sampled = _retime(refined_x_lhand_sampled)
+                        refined_x_rhand_sampled = _retime(refined_x_rhand_sampled)
+                        refined_x_obj_sampled   = _retime(refined_x_obj_sampled)
+                        if obj_nfeats == 10:
+                            fa = float(_np2.degrees(refined_x_obj_sampled[-1, 9].item()))
+                            print(f"  [Retime] {cur_len} → {retime_nframes} frames  (final angle={fa:.1f}°)")
                 
                 refined_obj_verts_tf, refined_lhand_verts, lhand_faces, \
                 refined_rhand_verts, rhand_faces = \
@@ -299,6 +408,16 @@ def main(config):
                             f"angle_comparison_b{batch_idx}_t{text_idx}.png",
                         ),
                         gt_angles_list=gt_angles_list,
+                    )
+                    save_angle_plot_realtime(
+                        gen_angles_all[key],
+                        save_path=osp.join(
+                            result_folder,
+                            "angle_plots_realtime",
+                            f"angle_realtime_b{batch_idx}_t{text_idx}.png",
+                        ),
+                        gt_angles_list=gt_angles_list,
+                        fps=fps,
                     )
 
                     # --- Render representative GT sequence (only once per key) ---

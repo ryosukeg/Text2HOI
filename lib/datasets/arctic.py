@@ -177,6 +177,11 @@ class MotionARCTIC(Dataset):
         max_nframes, 
         data_ratio=1.0, 
         augm=False, 
+        use_angle_cond=False,
+        angle_min_deg=0.0,
+        angle_max_deg=90.0,
+        angle_tol_deg=5.0,
+        angle_condition_mode="first_reach",
         **kwargs
     ):
         super().__init__()
@@ -186,29 +191,51 @@ class MotionARCTIC(Dataset):
         self.max_nframes = max_nframes
         self.data_ratio = data_ratio
         self.augm = augm
+        self.use_angle_cond = bool(use_angle_cond)
+        self.angle_min_deg = float(angle_min_deg)
+        self.angle_max_deg = float(angle_max_deg)
+        self.angle_tol_deg = float(angle_tol_deg)
+        self.angle_condition_mode = str(angle_condition_mode)
+
+        # optional per-object / per-action filtering (comma-separated strings)
+        _fo = kwargs.get("filter_objects", None)
+        self._filter_objects = [s.strip() for s in _fo.split(",")] if _fo else None
+        _fa = kwargs.get("filter_actions", None)
+        self._filter_actions = [s.strip() for s in _fa.split(",")] if _fa else None
 
         start_time = time.time()
         print("Start to read data arctic!!!")
         with np.load(data_path, allow_pickle=True) as data:
-            self.object_name = data["object_name"]
-            self.x_lhand = data["x_lhand"]
-            self.x_rhand = data["x_rhand"]
-            self.x_obj = data["x_obj"]
-            self.x_obj_angle = data["x_obj_angle"]
-            self.lhand_org = data["lhand_org"]
-            self.rhand_org = data["rhand_org"]
-            self.lcf_idx = data["lcf_idx"] # left hand contact frame idx
-            self.lcov_idx = data["lcov_idx"] # left contact object verts idx
-            self.lchj_idx = data["lchj_idx"] # left contact hand joints idx
-            self.ldist_value = data["ldist_value"]
-            self.rcf_idx = data["rcf_idx"] # right hand contact frame idx
-            self.rcov_idx = data["rcov_idx"] # right contact object verts idx
-            self.rchj_idx = data["rchj_idx"] # right contact hand joints idx
-            self.rdist_value = data["rdist_value"]
-            self.is_lhand = data["is_lhand"]
-            self.is_rhand = data["is_rhand"]
-            self.action_name = data["action_name"]
-            self.nframes = data["nframes"]
+            object_name_all = data["object_name"]
+            action_name_all = data["action_name"]
+            # build index mask
+            idx_mask = np.ones(len(object_name_all), dtype=bool)
+            if self._filter_objects:
+                idx_mask &= np.isin(object_name_all, self._filter_objects)
+            if self._filter_actions:
+                idx_mask &= np.isin(action_name_all, self._filter_actions)
+            sel = np.where(idx_mask)[0]
+            print(f"Filter: objects={self._filter_objects}, actions={self._filter_actions} "
+                  f"→ {len(sel)}/{len(object_name_all)} sequences kept")
+            self.object_name = object_name_all[sel]
+            self.x_lhand = data["x_lhand"][sel]
+            self.x_rhand = data["x_rhand"][sel]
+            self.x_obj = data["x_obj"][sel]
+            self.x_obj_angle = data["x_obj_angle"][sel]
+            self.lhand_org = data["lhand_org"][sel]
+            self.rhand_org = data["rhand_org"][sel]
+            self.lcf_idx = data["lcf_idx"][sel] # left hand contact frame idx
+            self.lcov_idx = data["lcov_idx"][sel] # left contact object verts idx
+            self.lchj_idx = data["lchj_idx"][sel] # left contact hand joints idx
+            self.ldist_value = data["ldist_value"][sel]
+            self.rcf_idx = data["rcf_idx"][sel] # right hand contact frame idx
+            self.rcov_idx = data["rcov_idx"][sel] # right contact object verts idx
+            self.rchj_idx = data["rchj_idx"][sel] # right contact hand joints idx
+            self.rdist_value = data["rdist_value"][sel]
+            self.is_lhand = data["is_lhand"][sel]
+            self.is_rhand = data["is_rhand"][sel]
+            self.action_name = action_name_all[sel]
+            self.nframes = data["nframes"][sel]
         with open(text_json, "r") as f:
             self.text_description = json.load(f)
 
@@ -229,11 +256,47 @@ class MotionARCTIC(Dataset):
         item["is_lhand"] = is_lhand
         item["is_rhand"] = is_rhand
 
-        if nframes > self.max_nframes:
-            init_frame = np.random.randint(0, nframes-self.max_nframes)
-            nframes = self.max_nframes
-        else:
+        if self.use_angle_cond:
+            orig_nframes = int(nframes)
             init_frame = 0
+            angle_seq_rad = self.x_obj_angle[index][:orig_nframes, 0].astype(np.float32)
+            tol_rad = float(np.deg2rad(self.angle_tol_deg))
+            end_frame = None
+            target_deg = None
+            for _ in range(10):
+                cand_deg = float(np.random.uniform(self.angle_min_deg, self.angle_max_deg))
+                cand_rad = float(np.deg2rad(cand_deg))
+                reach_idx = np.where(np.abs(angle_seq_rad - cand_rad) <= tol_rad)[0]
+                if len(reach_idx) > 0:
+                    target_deg = cand_deg
+                    end_frame = int(reach_idx[0])
+                    break
+            if end_frame is None:
+                cand_deg = float(np.random.uniform(self.angle_min_deg, self.angle_max_deg))
+                cand_rad = float(np.deg2rad(cand_deg))
+                if orig_nframes > 0:
+                    end_frame = int(np.argmin(np.abs(angle_seq_rad - cand_rad)))
+                else:
+                    end_frame = 0
+                target_deg = cand_deg
+            cut_nframes = max(end_frame + 1, 1)
+            # ---- stretch cut sequence to max_nframes so length is always fixed ----
+            # This decouples sequence length from target angle.
+            self._retime_cut = cut_nframes          # stored for use below
+            nframes = self.max_nframes              # valid frames = full length after stretch
+            denom = max(self.angle_max_deg - self.angle_min_deg, 1e-6)
+            angle_norm = (target_deg - self.angle_min_deg) / denom
+            item["target_angle_deg"] = np.float32(target_deg)
+            item["angle_cond"] = np.array([angle_norm], dtype=np.float32)
+        else:
+            self._retime_cut = None
+            if nframes > self.max_nframes:
+                init_frame = np.random.randint(0, nframes-self.max_nframes)
+                nframes = self.max_nframes
+            else:
+                init_frame = 0
+            item["target_angle_deg"] = np.float32(-1.0)
+            item["angle_cond"] = np.zeros(1, dtype=np.float32)
         
         item["nframes"] = nframes
         x_obj = self.x_obj[index][init_frame:init_frame+self.max_nframes]
@@ -241,6 +304,17 @@ class MotionARCTIC(Dataset):
             x_obj[:nframes], aug_rotmat, aug_trans = augmentation(x_obj[:nframes])
         x_obj_angle = self.x_obj_angle[index][init_frame:init_frame+self.max_nframes]
         x_obj = np.concatenate([x_obj, x_obj_angle], axis=1)
+
+        # ---- retime: stretch cut portion to max_nframes ----
+        if self._retime_cut is not None and self._retime_cut < self.max_nframes:
+            cut = self._retime_cut
+            t_src = np.linspace(0, cut - 1, cut)
+            t_dst = np.linspace(0, cut - 1, self.max_nframes)
+            x_obj = np.stack(
+                [np.interp(t_dst, t_src, x_obj[:cut, d]) for d in range(x_obj.shape[1])],
+                axis=1,
+            ).astype(np.float32)
+
         item["x_obj"] = x_obj
 
         if is_lhand:
@@ -254,6 +328,12 @@ class MotionARCTIC(Dataset):
                         aug_rotmat=aug_rotmat, 
                         aug_trans=aug_trans
                     )
+            if self._retime_cut is not None and self._retime_cut < self.max_nframes:
+                cut = self._retime_cut
+                x_lhand = np.stack(
+                    [np.interp(t_dst, t_src, x_lhand[:cut, d]) for d in range(x_lhand.shape[1])],
+                    axis=1,
+                ).astype(np.float32)
         else:
             x_lhand = np.zeros((150, 99), dtype=np.float32)
         
@@ -270,6 +350,12 @@ class MotionARCTIC(Dataset):
                         aug_rotmat=aug_rotmat, 
                         aug_trans=aug_trans
                     )
+            if self._retime_cut is not None and self._retime_cut < self.max_nframes:
+                cut = self._retime_cut
+                x_rhand = np.stack(
+                    [np.interp(t_dst, t_src, x_rhand[:cut, d]) for d in range(x_rhand.shape[1])],
+                    axis=1,
+                ).astype(np.float32)
         else:
             x_rhand = np.zeros((150, 99), dtype=np.float32)
         item["x_rhand"] = x_rhand

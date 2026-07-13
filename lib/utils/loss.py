@@ -108,14 +108,32 @@ def get_distance_map_loss(
         targ_ldist, targ_rdist, 
         weight=None, 
     ):
-    
-    ldist_loss = F.mse_loss(pred_ldist, targ_ldist, reduction="none")
-    rdist_loss = F.mse_loss(pred_rdist, targ_rdist, reduction="none")
     valid_map_ldist = targ_ldist > 0
     valid_map_rdist = targ_rdist > 0
-    filtered_ldist_loss = get_filtered_loss_valid_map(ldist_loss, valid_map_ldist, weight)
-    filtered_rdist_loss = get_filtered_loss_valid_map(rdist_loss, valid_map_rdist, weight)
+    filtered_ldist_loss = get_filtered_distance_map_loss(
+        pred_ldist, targ_ldist, valid_map_ldist, weight
+    )
+    filtered_rdist_loss = get_filtered_distance_map_loss(
+        pred_rdist, targ_rdist, valid_map_rdist, weight
+    )
     return filtered_ldist_loss+filtered_rdist_loss
+
+
+def get_filtered_distance_map_loss(pred_dist, targ_dist, valid_map, weight=None):
+    batch_losses = []
+    for batch_idx in range(pred_dist.shape[0]):
+        valid_idx = valid_map[batch_idx]
+        if valid_idx.any():
+            batch_loss = F.mse_loss(
+                pred_dist[batch_idx][valid_idx],
+                targ_dist[batch_idx][valid_idx],
+            )
+        else:
+            batch_loss = pred_dist.new_zeros(())
+        if weight is not None:
+            batch_loss = batch_loss * weight[batch_idx]
+        batch_losses.append(batch_loss)
+    return torch.stack(batch_losses).mean()
 
 def get_relative_orientation_loss(
         pred_lhand, pred_rhand, pred_obj, 

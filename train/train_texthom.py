@@ -60,6 +60,22 @@ def main(config):
     
     lhand_layer = build_mano_aa(is_rhand=False, flat_hand=data_config.flat_hand).cuda()
     rhand_layer = build_mano_aa(is_rhand=True, flat_hand=data_config.flat_hand).cuda()
+    # ---- Method 2: inject angle-condition dataset kwargs (arctic only) ----
+    use_angle_cond = bool(getattr(config.texthom, "use_angle_cond", False))
+    if dataset_name == "arctic" and use_angle_cond:
+        data_config.use_angle_cond = True
+        data_config.angle_min_deg = float(config.texthom.angle_min_deg)
+        data_config.angle_max_deg = float(config.texthom.angle_max_deg)
+        data_config.angle_tol_deg = float(config.texthom.angle_tol_deg)
+        data_config.angle_condition_mode = str(config.texthom.angle_condition_mode)
+        print(f"[Method2] angle-cond training enabled: "
+              f"[{data_config.angle_min_deg}, {data_config.angle_max_deg}] deg, "
+              f"tol={data_config.angle_tol_deg}, mode={data_config.angle_condition_mode}")
+    # ---- optional per-object / per-action filter (e.g. dataset.filter_objects=box) ----
+    if hasattr(data_config, "filter_objects") and data_config.filter_objects:
+        print(f"[Filter] objects={data_config.filter_objects}")
+    if hasattr(data_config, "filter_actions") and data_config.filter_actions:
+        print(f"[Filter] actions={data_config.filter_actions}")
     dataloader = get_dataloader("Motion"+dataset_name, config, data_config)
     texthom, diffusion \
         = build_model_and_diffusion(config, lhand_layer, rhand_layer)
@@ -101,6 +117,7 @@ def main(config):
             loss_simple_meter = AverageMeter()
             loss_dist_meter = AverageMeter()
             loss_rot_meter = AverageMeter()
+            target_angle_meter = AverageMeter()
             for item in dataloader:
                 if dataset_name == "arctic":
                     obj_pc_top_idx = item["obj_pc_top_idx"].cuda()
@@ -121,10 +138,30 @@ def main(config):
                 valid_mask_rhand = item["valid_mask_rhand"].cuda()
                 valid_mask_obj = item["valid_mask_obj"].cuda()
 
+                max_valid_nframes = int(valid_mask_obj.sum(dim=1).max().item())
+                if max_valid_nframes < x_obj.shape[1]:
+                    x_lhand = x_lhand[:, :max_valid_nframes]
+                    x_rhand = x_rhand[:, :max_valid_nframes]
+                    x_obj = x_obj[:, :max_valid_nframes]
+                    ldist_map = ldist_map[:, :max_valid_nframes]
+                    rdist_map = rdist_map[:, :max_valid_nframes]
+                    valid_mask_lhand = valid_mask_lhand[:, :max_valid_nframes]
+                    valid_mask_rhand = valid_mask_rhand[:, :max_valid_nframes]
+                    valid_mask_obj = valid_mask_obj[:, :max_valid_nframes]
+
                 text = item["text"]
                 enc_text = encoded_text(clip_model, text)
 
                 bs = x_obj.shape[0]
+
+                angle_cond_batch = None
+                if use_angle_cond and "angle_cond" in item:
+                    angle_cond_batch = item["angle_cond"].cuda().float()
+                    if "target_angle_deg" in item:
+                        target_angle_meter.update(
+                            float(item["target_angle_deg"].float().mean().item()), bs
+                        )
+
                 with torch.no_grad():
                     obj_feat = pointnet(normalized_obj_pc)
                 obj_feat_final = proc_obj_feat_final_train(
@@ -145,7 +182,8 @@ def main(config):
                         obj_verts_org=obj_pc_org, 
                         loss_lambda_dict=loss_lambda_dict, 
                         dataset_name=dataset_name,
-                        obj_pc_top_idx=obj_pc_top_idx, 
+                        obj_pc_top_idx=obj_pc_top_idx,
+                        angle_cond=angle_cond_batch,
                     )
                 simple_loss = losses_dict["simple_loss"]
                 dist_map_loss = losses_dict["dist_map_loss"]
@@ -181,9 +219,11 @@ def main(config):
                     "simple_loss": loss_simple_meter.avg,
                     "dist_map_loss": loss_dist_meter.avg,
                     "ro_loss": loss_rot_meter.avg,
+                    **({"target_angle_deg": target_angle_meter.avg} if use_angle_cond else {}),
                 }
             )
-            pbar.set_description(f"{model_name} | Best loss: {best_loss:.4f} ({best_epoch}), Cur loss: {cur_loss:.4f}")
+            pbar.set_description(f"{model_name} | Best loss: {best_loss:.4f} ({best_epoch}), Cur loss: {cur_loss:.4f}"
+                + (f", angle_avg: {target_angle_meter.avg:.2f}" if use_angle_cond else ""))
             
             if (epoch+1)%config.save_pth_freq==0:
                 torch.save(

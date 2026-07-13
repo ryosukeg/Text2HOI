@@ -13,6 +13,7 @@ class TextHOM(nn.Module):
                 use_contact_feat=True, 
                 use_frame_pos=True, 
                 use_inst_pos=True, 
+                use_angle_cond=False,
                 **kwargs):
         super().__init__()
         ### Variable
@@ -39,6 +40,7 @@ class TextHOM(nn.Module):
         self.use_obj_scale_centroid = use_obj_scale_centroid
         self.use_frame_pos = use_frame_pos
         self.use_inst_pos = use_inst_pos
+        self.use_angle_cond = use_angle_cond
         
         ### Architecture
         self.init_fc_lhand = InitFC(self.input_feats_hand, self.latent_dim)
@@ -68,6 +70,13 @@ class TextHOM(nn.Module):
         else:
             self.embed_obj = nn.Linear(self.obj_dim, self.latent_dim)
 
+        if self.use_angle_cond:
+            self.embed_angle = nn.Sequential(
+                nn.Linear(1, self.latent_dim),
+                nn.SiLU(),
+                nn.Linear(self.latent_dim, self.latent_dim),
+            )
+
         if use_cond_fc:
             self.out_fc_lhand = CondOutFC(self.input_feats_hand, self.latent_dim)
             self.out_fc_rhand = CondOutFC(self.input_feats_hand, self.latent_dim)
@@ -92,12 +101,15 @@ class TextHOM(nn.Module):
         timesteps, enc_text, 
         valid_mask_lhand=None, 
         valid_mask_rhand=None, 
-        valid_mask_obj=None
+        valid_mask_obj=None,
+        angle_cond=None,
     ):
         bs = timesteps.shape[0]
         emb = self.embed_timestep(timesteps)
         emb += self.embed_text(self.mask_cond(enc_text, force_mask=False))
         emb += self.embed_obj(self.mask_cond(obj_feat, force_mask=False))
+        if self.use_angle_cond and angle_cond is not None:
+            emb = emb + self.embed_angle(self.mask_cond(angle_cond, force_mask=False))
         x_init_lhand = self.init_fc_lhand(x_lhand)
         x_init_rhand = self.init_fc_rhand(x_rhand)
         x_init_obj = self.init_fc_obj(x_obj)

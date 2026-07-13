@@ -88,7 +88,8 @@ class Diffusion(nn.Module):
         obj_verts_org=None, 
         loss_lambda_dict=None, 
         dataset_name=None, 
-        obj_pc_top_idx=None
+        obj_pc_top_idx=None,
+        angle_cond=None,
     ):
         assert enc_text is not None
         return_list = []
@@ -118,7 +119,8 @@ class Diffusion(nn.Module):
                 timesteps, enc_text, 
                 valid_mask_lhand,
                 valid_mask_rhand, 
-                valid_mask_obj
+                valid_mask_obj,
+                angle_cond=angle_cond,
             )
         return_list.append(pred_X0_lhand)
         return_list.append(pred_X0_rhand)
@@ -222,7 +224,8 @@ class Diffusion(nn.Module):
         valid_mask_rhand, 
         valid_mask_obj, 
         device, 
-        return_middle=False, 
+        return_middle=False,
+        angle_cond=None,
     ):
         sampling_number = len(enc_text)
         sample_lhand = torch.randn([sampling_number, max_nframes, hand_nfeats]).to(device)
@@ -233,7 +236,8 @@ class Diffusion(nn.Module):
             sample_lhand, sample_rhand, sample_obj, 
             model, obj_feat, enc_text, 
             valid_mask_lhand, valid_mask_rhand, valid_mask_obj, 
-            return_middle, 
+            return_middle,
+            angle_cond=angle_cond,
         )
         return sample_lhand, sample_rhand, sample_obj
     
@@ -241,7 +245,8 @@ class Diffusion(nn.Module):
             self, sample_lhand, sample_rhand, sample_obj, 
             model, obj_feat, enc_text, 
             valid_mask_lhand, valid_mask_rhand, valid_mask_obj, 
-            return_middle, 
+            return_middle,
+            angle_cond=None,
         ):
         for t_idx in tqdm.tqdm(
             reversed(range(len(self.alpha_bars))), 
@@ -259,7 +264,8 @@ class Diffusion(nn.Module):
                     timesteps=t_idx, enc_text=enc_text, 
                     valid_mask_lhand=valid_mask_lhand, 
                     valid_mask_rhand=valid_mask_rhand, 
-                    valid_mask_obj=valid_mask_obj
+                    valid_mask_obj=valid_mask_obj,
+                    angle_cond=angle_cond,
                 )
             beta = self.betas[t_idx]
             alpha = self.alphas[t_idx]
