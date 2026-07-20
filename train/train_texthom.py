@@ -100,10 +100,12 @@ def main(config):
     lambda_simple = config.texthom.lambda_simple
     lambda_dist = config.texthom.lambda_dist
     lambda_ro = config.texthom.lambda_ro
+    lambda_angle = float(getattr(config.texthom, "lambda_angle", 0.0))
     loss_lambda_dict = {
         "lambda_simple": lambda_simple, 
         "lambda_dist": lambda_dist, 
         "lambda_ro": lambda_ro, 
+        "lambda_angle": lambda_angle, 
     }
     hand_nfeats = config.texthom.hand_nfeats
     obj_nfeats = config.texthom.obj_nfeats
@@ -117,6 +119,7 @@ def main(config):
             loss_simple_meter = AverageMeter()
             loss_dist_meter = AverageMeter()
             loss_rot_meter = AverageMeter()
+            loss_angle_meter = AverageMeter()
             target_angle_meter = AverageMeter()
             for item in dataloader:
                 if dataset_name == "arctic":
@@ -188,10 +191,12 @@ def main(config):
                 simple_loss = losses_dict["simple_loss"]
                 dist_map_loss = losses_dict["dist_map_loss"]
                 ro_loss = losses_dict["ro_loss"]
+                angle_loss = losses_dict.get("angle_loss", torch.zeros((), device=simple_loss.device))
                 
                 losses = lambda_simple*simple_loss \
                        + lambda_dist*dist_map_loss \
-                       + lambda_ro*ro_loss
+                       + lambda_ro*ro_loss \
+                       + lambda_angle*angle_loss
 
                 optimizer.zero_grad()
                 losses.backward()
@@ -200,6 +205,7 @@ def main(config):
                 loss_simple_meter.update(simple_loss.item(), bs)
                 loss_dist_meter.update(dist_map_loss.item(), bs)
                 loss_rot_meter.update(ro_loss.item(), bs)
+                loss_angle_meter.update(float(angle_loss.item()), bs)
             
             cur_loss = loss_meter.avg
             if cur_loss < best_loss:
@@ -219,10 +225,12 @@ def main(config):
                     "simple_loss": loss_simple_meter.avg,
                     "dist_map_loss": loss_dist_meter.avg,
                     "ro_loss": loss_rot_meter.avg,
+                    "angle_loss": loss_angle_meter.avg,
                     **({"target_angle_deg": target_angle_meter.avg} if use_angle_cond else {}),
                 }
             )
             pbar.set_description(f"{model_name} | Best loss: {best_loss:.4f} ({best_epoch}), Cur loss: {cur_loss:.4f}"
+                + (f", angle_loss: {loss_angle_meter.avg:.4f}" if lambda_angle > 0 else "")
                 + (f", angle_avg: {target_angle_meter.avg:.2f}" if use_angle_cond else ""))
             
             if (epoch+1)%config.save_pth_freq==0:

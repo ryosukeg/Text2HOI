@@ -54,7 +54,8 @@ def main(config):
     data_config = config.dataset
     dataset_name = data_config.name
 
-    save_root = f"demo_output/{dataset_name}"
+    model_name = config.texthom.model_name
+    save_root = f"demo_output/{dataset_name}_{model_name}"
     result_folder = make_save_folder(save_root)
     
     save_obj = config.save_obj

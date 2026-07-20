@@ -8,6 +8,7 @@ from lib.utils.loss import (
     get_l2_loss, 
     get_distance_map_loss, 
     get_relative_orientation_loss, 
+    get_angle_loss, 
 )
 from lib.utils.proc_output import get_hand_obj_dist_map
 
@@ -166,6 +167,7 @@ class Diffusion(nn.Module):
         lambda_simple = loss_lambda_dict["lambda_simple"]
         lambda_dist = loss_lambda_dict["lambda_dist"]
         lambda_ro = loss_lambda_dict["lambda_ro"]
+        lambda_angle = loss_lambda_dict.get("lambda_angle", 0.0)
         
         # diffusion simple loss
         if lambda_simple > 0:
@@ -206,11 +208,20 @@ class Diffusion(nn.Module):
             )
         else:
             ro_loss = torch.FloatTensor(1).fill_(0).cuda()
-        
+
+        # Angle loss (arctic only: last channel of x_obj = articulation angle)
+        if lambda_angle > 0 and pred_X0_obj.shape[-1] >= 10:
+            angle_loss = get_angle_loss(
+                pred_X0_obj, targ_obj, valid_mask_obj,
+            )
+        else:
+            angle_loss = torch.FloatTensor(1).fill_(0).cuda()
+
         total_loss = {
             "simple_loss": simple_loss,
             "dist_map_loss": dist_map_loss,
             "ro_loss": ro_loss,
+            "angle_loss": angle_loss,
         }
         return total_loss
     

@@ -16,6 +16,8 @@ num_workers: 4
 result_show_freq: 500
 save_pth_freq: 2000
 text: ["Place cappuccino with right hand."]
+test_text: ["Open box with both hands."]
+nsamples: 1
 save_demo: False
 save_obj: False
 balance_weights: True

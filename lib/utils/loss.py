@@ -161,6 +161,29 @@ def get_relative_orientation_loss(
         ro_rhand_loss = F.mse_loss(pred_ro_rhand, targ_ro_rhand)
     return ro_lhand_loss + ro_rhand_loss
 
+def get_angle_loss(pred_obj, targ_obj, mask_obj, weight=None):
+    """MSE loss on the articulated-object joint angle (last channel of x_obj).
+
+    Only meaningful for arctic (obj_nfeats>=10) where index 9 encodes the
+    articulation angle in radians. For datasets without an angle channel we
+    return a zero tensor on the same device to keep training code uniform.
+    """
+    if pred_obj is None or targ_obj is None:
+        return torch.zeros((), device=pred_obj.device if pred_obj is not None else "cuda")
+    if pred_obj.shape[-1] < 10 or targ_obj.shape[-1] < 10:
+        return pred_obj.new_zeros(())
+
+    # Take the last channel (angle). Keep last dim so shape is (B, T, 1) and
+    # matches the layout expected by get_filtered_loss_valid_mask.
+    pred_angle = pred_obj[..., -1:]
+    targ_angle = targ_obj[..., -1:]
+    angle_l2 = F.mse_loss(pred_angle, targ_angle, reduction='none')
+    if mask_obj is not None:
+        filtered_loss = get_filtered_loss_valid_mask(angle_l2, mask_obj, weight)
+    else:
+        filtered_loss = angle_l2.mean()
+    return filtered_loss
+
 # ro: relative orientation
 def get_ro(hand, obj, valid_mask):
     hand_orient = hand[valid_mask][..., 3:9]

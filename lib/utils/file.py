@@ -127,7 +127,8 @@ def save_frames(frames, save_folder, image_ext="png"):
 
 # Add plot angle comparison function
 def save_angle_plot_realtime(gen_angles_list, save_path, gt_angles_list=None, fps=30):
-    """Save an articulation angle plot with real time (seconds) on the x-axis.
+    """Save an articulation angle plot with frame number on the bottom x-axis
+    and real time (seconds) on the top x-axis.
 
     Each sequence is plotted at its own true duration without resampling.
 
@@ -154,40 +155,50 @@ def save_angle_plot_realtime(gen_angles_list, save_path, gt_angles_list=None, fp
     if gt_angles_list is not None and len(gt_angles_list) > 0:
         for g in gt_angles_list:
             g = np.asarray(g, dtype=float)
-            t = np.arange(len(g)) / fps
-            ax.plot(t, g, color="lightcoral", linewidth=0.8, alpha=0.4)
-        # mean on a common grid (max length among GT)
+            frames = np.arange(len(g))
+            ax.plot(frames, g, color="lightcoral", linewidth=0.8, alpha=0.4)
         max_len_gt = max(len(np.asarray(g)) for g in gt_angles_list)
-        common_t = np.arange(max_len_gt) / fps
+        common_frames_gt = np.arange(max_len_gt)
         gt_interp = np.full((len(gt_angles_list), max_len_gt), np.nan)
         for i, g in enumerate(gt_angles_list):
             g = np.asarray(g, dtype=float)
             gt_interp[i, :len(g)] = g
         gt_mean = np.nanmean(gt_interp, axis=0)
-        ax.plot(common_t, gt_mean, color="tomato", linewidth=2.0,
+        ax.plot(common_frames_gt, gt_mean, color="tomato", linewidth=2.0,
                 label=f"GT mean  (n={len(gt_angles_list)})")
 
     # ---- Generated ----
     if gen_angles_list is not None and len(gen_angles_list) > 0:
         for g in gen_angles_list:
             g = np.asarray(g, dtype=float)
-            t = np.arange(len(g)) / fps
-            ax.plot(t, g, color="lightskyblue", linewidth=1.2, alpha=0.7)
+            frames = np.arange(len(g))
+            ax.plot(frames, g, color="lightskyblue", linewidth=1.2, alpha=0.7)
         max_len_gen = max(len(np.asarray(g)) for g in gen_angles_list)
-        common_t_gen = np.arange(max_len_gen) / fps
+        common_frames_gen = np.arange(max_len_gen)
         gen_interp = np.full((len(gen_angles_list), max_len_gen), np.nan)
         for i, g in enumerate(gen_angles_list):
             g = np.asarray(g, dtype=float)
             gen_interp[i, :len(g)] = g
         gen_mean = np.nanmean(gen_interp, axis=0)
-        ax.plot(common_t_gen, gen_mean, color="steelblue", linewidth=2.0,
+        ax.plot(common_frames_gen, gen_mean, color="steelblue", linewidth=2.0,
                 label=f"Generated mean  (n={len(gen_angles_list)})")
 
-    ax.set_xlabel("Time (s)")
+    ax.set_xlabel("Frame")
     ax.set_ylabel("Articulation angle (deg)")
     ax.set_title("Object articulation angle  (real time)")
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.5)
+
+    # ---- Secondary x-axis: seconds ----
+    ax_top = ax.twiny()
+    ax_top.set_xlim(np.array(ax.get_xlim()) / fps)
+    ax_top.set_xlabel("Time (s)")
+    # Sync tick positions from bottom axis → convert to seconds
+    bottom_ticks = ax.get_xticks()
+    top_ticks = bottom_ticks / fps
+    ax_top.set_xticks(top_ticks)
+    ax_top.set_xticklabels([f"{v:.1f}" for v in top_ticks])
+
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
