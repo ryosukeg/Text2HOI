@@ -76,6 +76,150 @@ def _resample_to_n(traj: np.ndarray, n: int = 100) -> np.ndarray:
     return np.interp(dst_x, src_x, traj)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Target-Angle Hold Ratio (TAHR)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 「モーション末尾の窓で、生成角度が目標角度 ±ε° に収まっているフレームの割合」
+#
+#   TAHR_i(W, ε) = (1 / |W_i|) · Σ_{t ∈ W_i} 1[ |θ_pred_i(t) − θ*| ≤ ε ]
+#
+# 末尾窓 W は 2 種類を並列で評価する:
+#   - fixed  : 末尾 terminal_frames フレーム（デフォルト 30）
+#   - ratio  : 末尾 terminal_ratio %       （デフォルト 20%）
+# 許容誤差 ε ∈ tolerances（デフォルト [5, 10, 15]°）
+# サンプルレベル成功は TAHR_i ≥ success_ratio（デフォルト 0.5）で判定。
+
+def _compute_hold_ratio(
+    angles_deg: np.ndarray,
+    target_deg: float,
+    tolerances,
+    terminal_frames: int,
+    terminal_ratio: float,
+) -> dict:
+    """1 サンプルの角度軌跡に対する hold ratio を計算し、
+    { (window_name, tol_deg) : ratio } の辞書を返す。"""
+    n = len(angles_deg)
+    windows = {}
+    w_fix_len = min(terminal_frames, n)
+    windows[f"last{terminal_frames}f"] = angles_deg[-w_fix_len:]
+    w_rat_len = max(1, int(round(n * terminal_ratio)))
+    windows[f"last{int(round(terminal_ratio * 100))}pct"] = angles_deg[-w_rat_len:]
+
+    out = {}
+    for wname, w in windows.items():
+        diff = np.abs(w - target_deg)
+        for tol in tolerances:
+            out[(wname, float(tol))] = float(np.mean(diff <= tol))
+    return out
+
+
+def _aggregate_hold(results: dict, tolerances, window_names, success_ratio: float):
+    """target × (window, tol) ごとに mean/std/success_rate を集計。
+
+    Returns:
+        agg[target][(wname, tol)] = {"mean":..., "std":..., "success":...}
+    """
+    agg = {}
+    for t, rec in results.items():
+        holds = rec.get("hold", [])
+        agg[t] = {}
+        for wname in window_names:
+            for tol in tolerances:
+                key = (wname, float(tol))
+                vals = np.array([h[key] for h in holds]) if len(holds) else np.array([])
+                if len(vals) == 0:
+                    agg[t][key] = {"mean": np.nan, "std": np.nan, "success": np.nan}
+                else:
+                    agg[t][key] = {
+                        "mean": float(vals.mean()),
+                        "std":  float(vals.std()),
+                        "success": float(np.mean(vals >= success_ratio)),
+                    }
+    return agg
+
+
+def _plot_hold_ratio(
+    agg: dict, tolerances, window_names, save_dir: str, success_ratio: float
+):
+    """target × tolerance の hold-ratio ヒートマップと success-rate ヒートマップを保存。"""
+    targets = sorted(agg.keys())
+    tol_arr = list(tolerances)
+
+    for wname in window_names:
+        mean_mat    = np.array([[agg[t][(wname, float(tol))]["mean"]    for tol in tol_arr] for t in targets])
+        success_mat = np.array([[agg[t][(wname, float(tol))]["success"] for tol in tol_arr] for t in targets])
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        for ax, mat, title, cbar_label in zip(
+            axes,
+            [mean_mat, success_mat],
+            [f"Frame-level TAHR  (window={wname})",
+             f"Sample success @ TAHR≥{success_ratio}  (window={wname})"],
+            ["mean hold ratio", "success rate"],
+        ):
+            im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap="viridis", aspect="auto")
+            ax.set_xticks(range(len(tol_arr)))
+            ax.set_xticklabels([f"±{tol:g}°" for tol in tol_arr])
+            ax.set_yticks(range(len(targets)))
+            ax.set_yticklabels([f"{t:.0f}°" for t in targets])
+            ax.set_xlabel("Tolerance ε")
+            ax.set_ylabel("Target angle")
+            ax.set_title(title, fontsize=12)
+            for i in range(mat.shape[0]):
+                for j in range(mat.shape[1]):
+                    v = mat[i, j]
+                    if not np.isnan(v):
+                        color = "white" if v < 0.55 else "black"
+                        ax.text(j, i, f"{v:.2f}", ha="center", va="center",
+                                color=color, fontsize=10)
+            plt.colorbar(im, ax=ax, label=cbar_label)
+
+        fig.tight_layout()
+        path = osp.join(save_dir, f"hold_ratio_heatmap_{wname}.png")
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+        print(f"  [saved] {path}")
+
+
+def _print_hold_table(
+    agg: dict, tolerances, window_names, success_ratio: float, save_dir: str
+):
+    """テキストテーブルを stdout と txt に出力。"""
+    targets = sorted(agg.keys())
+    lines = []
+    lines.append("")
+    lines.append("=" * 90)
+    lines.append(f"  Target-Angle Hold Ratio (TAHR)   success threshold = {success_ratio}")
+    lines.append("=" * 90)
+    for wname in window_names:
+        lines.append(f"\n  [window = {wname}]")
+        header = f"  {'target':>7} | " + " | ".join(
+            [f"±{tol:>2g}° TAHR(mean±std)   succ" for tol in tolerances]
+        )
+        lines.append(header)
+        lines.append("  " + "-" * (len(header) - 2))
+        for t in targets:
+            cells = []
+            for tol in tolerances:
+                a = agg[t][(wname, float(tol))]
+                cells.append(f"{a['mean']:.2f}±{a['std']:.2f}   {a['success']:.2f}")
+            lines.append(f"  {t:>6.0f}° | " + " | ".join(cells))
+        # overall mean
+        overall = {tol: np.nanmean([agg[t][(wname, float(tol))]["success"] for t in targets])
+                   for tol in tolerances}
+        overall_str = "  overall success: " + "  ".join(
+            [f"±{tol:g}°={overall[tol]:.2f}" for tol in tolerances]
+        )
+        lines.append(overall_str)
+    lines.append("=" * 90)
+
+    text = "\n".join(lines)
+    print(text)
+    with open(osp.join(save_dir, "hold_ratio_table.txt"), "w") as f:
+        f.write(text + "\n")
+
+
 def _plot_summary(results: dict, save_dir: str, angle_min: float, angle_max: float):
     """
     results: {target_deg (int/float): {"final": list[float], "max": list[float], "traj": list[np.ndarray]}}
@@ -248,8 +392,23 @@ def main(config):
             np.linspace(angle_min_deg, angle_max_deg, 7).round(0)
         )
 
+    # ── TAHR 設定（CLI で +... で上書き可）──
+    terminal_frames = int(config.get("terminal_frames", 30))
+    terminal_ratio  = float(config.get("terminal_ratio", 0.2))
+    if "tolerances" in config:
+        tolerances = [float(t) for t in config.tolerances]
+    else:
+        tolerances = [5.0, 10.0, 15.0]
+    success_ratio   = float(config.get("success_ratio", 0.5))
+    window_names = [
+        f"last{terminal_frames}f",
+        f"last{int(round(terminal_ratio * 100))}pct",
+    ]
+
     print(f"\n[Eval] target_angles = {[f'{a:.0f}' for a in target_angles]}")
-    print(f"[Eval] nsamples per target = {nsamples}\n")
+    print(f"[Eval] nsamples per target = {nsamples}")
+    print(f"[Eval] TAHR window     = last {terminal_frames} frames / last {int(terminal_ratio*100)}%")
+    print(f"[Eval] TAHR tolerances = {tolerances}  |  success threshold = {success_ratio}\n")
 
     # ── 出力フォルダ ──
     save_dir = osp.join(
@@ -291,7 +450,7 @@ def main(config):
     batch_num  = len(text) // 64 + 1
 
     # ── 結果格納 ──
-    results = {t: {"final": [], "max": [], "traj": []} for t in target_angles}
+    results = {t: {"final": [], "max": [], "traj": [], "hold": []} for t in target_angles}
 
     # ── ターゲット角度ループ ──
     for target_deg in target_angles:
@@ -390,18 +549,32 @@ def main(config):
                     final_angle = float(angles_deg[-1])
                     max_angle   = float(angles_deg.max())
 
+                    hold_dict = _compute_hold_ratio(
+                        angles_deg, target_deg,
+                        tolerances, terminal_frames, terminal_ratio,
+                    )
+
                     results[target_deg]["final"].append(final_angle)
                     results[target_deg]["max"].append(max_angle)
                     results[target_deg]["traj"].append(angles_deg)
+                    results[target_deg]["hold"].append(hold_dict)
 
+                    # 代表 tolerance (=最初) の hold ratio を進捗表示
+                    _first_key = (window_names[0], float(tolerances[0]))
                     print(
                         f"  sample={sample_idx} text={text_idx}  "
-                        f"final={final_angle:.1f}°  max={max_angle:.1f}°"
+                        f"final={final_angle:.1f}°  max={max_angle:.1f}°  "
+                        f"TAHR[{window_names[0]},±{tolerances[0]:g}°]={hold_dict[_first_key]:.2f}"
                     )
 
     # ── 集計・出力 ──
     _print_table(results)
     _plot_summary(results, save_dir, angle_min_deg, angle_max_deg)
+
+    # ── TAHR 集計・出力 ──
+    agg = _aggregate_hold(results, tolerances, window_names, success_ratio)
+    _print_hold_table(agg, tolerances, window_names, success_ratio, save_dir)
+    _plot_hold_ratio(agg, tolerances, window_names, save_dir, success_ratio)
 
     print(f"\n[Done] 評価結果を保存しました: {save_dir}")
 

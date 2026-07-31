@@ -160,11 +160,18 @@ def main(config):
     print(f"[Compare] model={config.texthom.model_name}  use_angle_cond={use_angle_cond}")
     print(f"[Compare] target_angles={target_angles} + no-angle  nsamples={nsamples}  n_save={n_save}")
 
-    root_dir = osp.join(
-        osp.dirname(osp.abspath(osp.dirname(__file__))),
-        "demo_output", "compare_angle_conditions",
-        config.texthom.model_name,
-    )
+    # +save_subdir=foo/bar で demo_output/foo/bar/ に保存できる
+    if "save_subdir" in config:
+        root_dir = osp.join(
+            osp.dirname(osp.abspath(osp.dirname(__file__))),
+            "demo_output", str(config.save_subdir),
+        )
+    else:
+        root_dir = osp.join(
+            osp.dirname(osp.abspath(osp.dirname(__file__))),
+            "demo_output", "compare_angle_conditions",
+            config.texthom.model_name,
+        )
     os.makedirs(root_dir, exist_ok=True)
 
     # ── モデル読み込み ──
