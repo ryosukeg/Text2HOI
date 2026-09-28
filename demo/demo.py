@@ -1,3 +1,4 @@
+import os
 import os.path as osp
 import sys
 sys.path.append(osp.dirname(osp.abspath(osp.dirname(__file__))))
@@ -42,7 +43,53 @@ from lib.utils.proc import (
     proc_numpy, 
     proc_torch_cuda, 
 )
+from lib.utils.rot import rot6d_to_axis_angle
 from lib.utils.visualize import render_videos
+
+
+def _save_mano_params_npz(
+    save_path,
+    x_lhand, x_rhand, x_obj,
+    is_lhand, is_rhand,
+    dataset_name, flat_hand, fps, text,
+):
+    """Save raw Text2HOI hand/object parameters for downstream physics replay.
+
+    Layout per sequence (float32 unless noted):
+      lhand_trans : (T, 3)        world-space wrist translation
+      lhand_pose  : (T, 48)       axis-angle: [0:3]=wrist rot, [3:48]=15 finger joints
+      rhand_trans : (T, 3)
+      rhand_pose  : (T, 48)
+      obj_params  : (T, D)        D=9 (trans3+rot6d6) for grab/h2o, 10 (+angle) for arctic
+    """
+    os.makedirs(osp.dirname(save_path), exist_ok=True)
+
+    def _hand_to_aa(x_hand):
+        # x_hand: (T, 99) = trans(3) + rot6d(16*6)
+        trans = x_hand[..., :3].detach().cpu().numpy().astype(np.float32)
+        rot6d = x_hand[..., 3:]
+        pose_aa = rot6d_to_axis_angle(rot6d).reshape(-1, 48)
+        pose_aa = pose_aa.detach().cpu().numpy().astype(np.float32)
+        return trans, pose_aa
+
+    lhand_trans, lhand_pose = _hand_to_aa(x_lhand)
+    rhand_trans, rhand_pose = _hand_to_aa(x_rhand)
+    obj_params = x_obj.detach().cpu().numpy().astype(np.float32)
+
+    np.savez(
+        save_path,
+        lhand_trans=lhand_trans,
+        lhand_pose=lhand_pose,
+        rhand_trans=rhand_trans,
+        rhand_pose=rhand_pose,
+        obj_params=obj_params,
+        is_lhand=np.array(bool(is_lhand)),
+        is_rhand=np.array(bool(is_rhand)),
+        dataset=np.array(str(dataset_name)),
+        flat_hand=np.array(bool(flat_hand)),
+        fps=np.array(int(fps)),
+        text=np.array(str(text)),
+    )
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 @torch.no_grad()
@@ -319,6 +366,24 @@ def main(config):
                             fa = float(_np2.degrees(refined_x_obj_sampled[-1, 9].item()))
                             print(f"  [Retime] {cur_len} → {retime_nframes} frames  (final angle={fa:.1f}°)")
                 
+                # ---- save raw MANO/object params for physics replay (e.g. manosim) ----
+                _save_mano_params_npz(
+                    save_path=osp.join(
+                        result_folder,
+                        "mano_params",
+                        f"generated_b{batch_idx}_t{text_idx}_s{sample_idx}.npz",
+                    ),
+                    x_lhand=refined_x_lhand_sampled,
+                    x_rhand=refined_x_rhand_sampled,
+                    x_obj=refined_x_obj_sampled,
+                    is_lhand=is_lhand_text,
+                    is_rhand=is_rhand_text,
+                    dataset_name=dataset_name,
+                    flat_hand=bool(data_config.flat_hand),
+                    fps=fps,
+                    text=text[batch_idx * 64 + text_idx],
+                )
+
                 refined_obj_verts_tf, refined_lhand_verts, lhand_faces, \
                 refined_rhand_verts, rhand_faces = \
                     proc_results(
